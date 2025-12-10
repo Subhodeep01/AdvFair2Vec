@@ -1,0 +1,137 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import os
+import re
+from collections import Counter
+
+# ==========================================
+# 1. SETUP & DEFINITIONS (Must match training)
+# ==========================================
+
+# GPU Setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Running inference on: {device}")
+
+# Preprocessing Helpers
+def simple_tokenizer(text):
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\-\s]', '', text) 
+    return text.split()
+
+def get_file_iterator(file_path, max_sentences=None):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Could not find corpus file: {file_path}")
+    count = 0
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield line
+                count += 1
+                if max_sentences and count >= max_sentences: break
+
+def build_vocabulary(corpus_iterator, min_freq=5, max_vocab_size=50000):
+    print("Rebuilding vocabulary from corpus...")
+    token_counts = Counter()
+    for text_chunk in corpus_iterator:
+        tokens = simple_tokenizer(text_chunk)
+        token_counts.update(tokens)
+    
+    vocab_freqs = token_counts.most_common(max_vocab_size)
+    vocab_freqs = [pair for pair in vocab_freqs if pair[1] >= min_freq]
+    
+    word2idx = {word: idx for idx, (word, count) in enumerate(vocab_freqs)}
+    idx2word = {idx: word for word, idx in word2idx.items()}
+    print(f"Vocab size: {len(word2idx)}")
+    return word2idx, idx2word, vocab_freqs
+
+# Model Class (Must be identical to training script)
+class Word2VecModel(nn.Module):
+    def __init__(self, vocab_size, embed_dim):
+        super(Word2VecModel, self).__init__()
+        self.in_embed = nn.Embedding(vocab_size, embed_dim)
+        self.out_embed = nn.Embedding(vocab_size, embed_dim)
+        
+    def forward(self, target_ids, context_ids):
+        in_vecs = self.in_embed(target_ids)
+        out_vecs = self.out_embed(context_ids)
+        return torch.sum(in_vecs * out_vecs, dim=1)
+    
+    def get_embedding(self, word_ids):
+        return self.in_embed(word_ids)
+
+# ==========================================
+# 2. LOADING LOGIC
+# ==========================================
+
+def load_trained_model(checkpoint_path, corpus_path, embed_dim=50, max_sentences=100000):
+    # 1. Rebuild Vocab
+    vocab_iter = get_file_iterator(corpus_path, max_sentences=max_sentences)
+    word2idx, idx2word, _ = build_vocabulary(vocab_iter, min_freq=5,max_vocab_size=150000)
+    
+    # 2. Init Model
+    model = Word2VecModel(len(word2idx), embed_dim).to(device)
+    
+    # 3. Load Weights
+    if os.path.isfile(checkpoint_path):
+        print(f"Loading checkpoint '{checkpoint_path}'...")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # We need to extract the 'state_dict' part of the checkpoint
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval() # Set to evaluation mode
+        print("Model loaded successfully!")
+    else:
+        raise FileNotFoundError(f"No checkpoint found at '{checkpoint_path}'")
+        
+    return model, word2idx, idx2word
+
+# ==========================================
+# 3. SIMILARITY CHECKER
+# ==========================================
+
+def get_most_similar(model, word, word2idx, idx2word, top_k=5):
+    if word not in word2idx:
+        print(f"'{word}' is not in the vocabulary.")
+        return
+    
+    # Prepare input
+    target_idx = torch.tensor([word2idx[word]], device=device)
+    target_vec = model.get_embedding(target_idx)
+    
+    # Calculate similarities against ALL words
+    all_vecs = model.in_embed.weight
+    sims = F.cosine_similarity(target_vec, all_vecs)
+    
+    # Get top K
+    values, indices = torch.topk(sims, top_k+1)
+    
+    print(f"\nWords closest to '{word}':")
+    found = 0
+    for v, idx in zip(values, indices):
+        w = idx2word[idx.item()]
+        if w != word: # Skip the word itself
+            print(f"  - {w:<15} (Score: {v.item():.4f})")
+            found += 1
+            if found >= top_k: break
+
+# ==========================================
+# 4. EXECUTION
+# ==========================================
+
+if __name__ == "__main__":
+    # CONFIG
+    CHECKPOINT = "checkpoint_fair2vec.pth.tar" # Use your best epoch
+    CORPUS = "wikipedia_en_20231101.txt"
+    MAX_SENTENCES = 2000000 # Must match what you trained with!
+    
+    # Load
+    model, word2idx, idx2word = load_trained_model(CHECKPOINT, CORPUS, embed_dim=128, max_sentences=MAX_SENTENCES)
+    
+    # Test
+    print("\n--- Semantic Sanity Check ---")
+    test_words = ['doctor', 'nurse', 'engineer', 'homemaker', 'king', 'queen', 'man', 'woman']
+    
+    for w in test_words:
+        get_most_similar(model, w, word2idx, idx2word)
