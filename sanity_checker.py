@@ -122,7 +122,7 @@ def get_most_similar(model, word, word2idx, idx2word, top_k=5):
 
 if __name__ == "__main__":
     # CONFIG
-    CHECKPOINT = "checkpoint_fair2vec.pth.tar" # Use your best epoch
+    CHECKPOINT = "checkpoint_word2vec.pth.tar" # Use your best epoch
     CORPUS = "wikipedia_en_20231101.txt"
     MAX_SENTENCES = 2000000 # Must match what you trained with!
     
